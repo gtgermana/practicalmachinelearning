@@ -1,0 +1,240 @@
+---
+title: "Weight Exercise Form Prediction"
+author: "Guy Germana"
+date: "10/16/2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary
+The goal of this project is to predict the manner in which a weight exercise was performed by six individuals. Training data consists of accelerometer measurements from the belt, forearm, arm and dumbbell.  
+Four different learning methods are employed: k-Nearest Neighbor (KNN), Random Forest (RF), Extreme Gradient Boosting (XGB) and Support Vector Machine (SVM). All four methods produced excellent results on both the training data (as expected) and the validation data.  
+When applied to the test data, for which the correct classification is not given, all four methods gave the same results. When these results were entered into the Quiz, a perfect score was achieved.   
+Note that the test set results are not displayed in this report to maintain the integrity of the Quiz.  
+
+```{r}
+library(plyr)
+library(dplyr, warn.conflicts = FALSE)
+library(lattice)
+library(ggplot2)
+library(parallel)
+library(caret)
+
+set.seed(192837)
+```
+  
+## Data Cleaning
+The training and testing datasets are first read in. Features (i.e., variables) having NA values are removed. These "bad" features have approximately 400 non NA values out of 19622 total values in training0. See the *max-roll-belt* variable for an example.  
+Additional "factor" variables are also removed. These "bad" factors contained mostly "" (i.e., the empty string) values. See the *kurtosis-roll-belt* variable for an example. Removal of the "bad" features, including factors, results in a training1 dataframe with 54 out of the original 160 variables remaining. The same features removed from the training0 dataframe are also removed from the testing dataframe.  
+The training1 dataframe was split into a pure training (70%) dataframe and a validation (30%) dataframe. The training dataframe is used to train models to predict the manner in which an exercise was performed as encoded by the *classe* variable.The validation dataframe is used to estimate the out of sample error. The testing dataframe is used to predict the *classe* variable on the twenty test observations employed by the Quiz.
+  
+
+```{r}
+training0 = read.csv("pml-training.csv")
+training1 = dplyr::select(training0, c(7:11, 37:49, 60:68, 84:86, 102, 113:124, 140, 151:160))
+
+testing = read.csv("pml-testing.csv")
+testing = dplyr::select(testing, c(7:11, 37:49, 60:68, 84:86, 102, 113:124, 140, 151:160))
+
+inTrain = createDataPartition(training1$classe, p = 0.7, list = FALSE)
+training = training1[inTrain,]
+validation = training1[-inTrain,]
+names(training)
+```
+  
+## Learning Methods
+Four learning methods were chosen; see each section for the reason why each was selected.  
+  
+### k-Nearest Neighbor
+KNN was chosen as an example of a simple but effective learning method.  
+```{r}
+library(FNN)
+knn.train = dplyr::select(training, -classe)
+knn.val = dplyr::select(validation, -classe)
+knn.test = dplyr::select(testing, -problem_id)
+```  
+The value of k, the number of nearest neighbors, was chosen by training five KNN classifiers for k = {1,3,5,7,9}, evaluting each classifier on the validation data, and choosing the value of k giving the lowest number of misclassifications. The plot below shows the misclassifications versus k.  
+```{r}
+k = c(1,3,5,7,9)
+misclass = c(178, 340, 462, 561, 640)
+plot(k, misclass, 
+     xlab = "K (number of nearest neighbors)", ylab = "Misclassifications")
+```   
+
+    
+Compute the KNN misclassification rate for the training data, using k = 1:  
+```{r}
+knn.pred.train = knn(knn.train, knn.train, training$classe, k = 1)
+table(knn.pred.train, training$classe)
+```
+The total training misclassification rate is `r round((0/13737)*100.0, 3)` percent.  
+  
+Compute the KNN misclassification rate for the validation data:  
+```{r}
+knn.pred.val = knn(knn.train, knn.val, training$classe, k = 1)
+table(knn.pred.val, validation$classe)
+```  
+The total KNN validation misclassification rate is `r round((178/5885)*100.0, 3)` percent.  
+  
+The KNN predicted classifications for the test set observations are computed as follows.  
+```{r}
+knn.pred.test = knn(knn.train, knn.test, training$classe, k = 1)
+```   
+   
+### Random Forest
+RF was chosen because it is one of the most effective techniques based on the results of competitions. The Out Of Bag (OOB) error is the estimated error for the trained models, using the data not included in the training set for that particular tree. (See Reference 1, p232.)    
+```{r message = FALSE}
+library(randomForest, warn.conflicts = FALSE, quietly = TRUE)
+```
+```{r}
+rf.mod = randomForest(classe ~ ., data = training, ntree = 1000, importance = TRUE)
+rf.mod
+```   
+Variable importance is shown in the plot below.  
+```{r}
+varImpPlot(rf.mod, type = 1, n.var = 16)
+```  
+Compute the RF misclassification rate for the training data:  
+```{r}
+rf.pred.train = predict(rf.mod, training)
+table(rf.pred.train, training$classe)
+```
+The total RF training misclassification rate is `r round((0/13737)*100.0, 3)` percent.  
+  
+Compute the RF misclassification rate for the validation data:  
+```{r}
+rf.pred.val = predict(rf.mod, validation)
+table(rf.pred.val, validation$classe)
+```
+The total RF validation misclassification rate is `r round((12/5885)*100.0, 3)` percent.  
+  
+The RF predicted classifications for the test set observations are computed as follows.  
+```{r}
+rf.pred.test = predict(rf.mod, testing)
+```   
+   
+### Extreme Gradient Boosting
+Boosting, in this case the XGB version, was chosen because  it, like RF, is one of the most effective techniques based on the results of competitions.  
+```{r}
+library(xgboost, warn.conflicts = FALSE)
+```  
+```{r}
+xgb.mod = xgboost(data = data.matrix(training[, -54]), 
+                  label = as.numeric(training$classe) - 1, 
+                  objective = "multi:softmax", nrounds = 100, 
+                  verbose = 1, print_every_n = 10,
+                  params = list(eta = 0.05, lambda = 100), num_class = 5)
+```
+The first sixteen model features ranked by importance are shown in the list below.  
+```{r}
+xgbImpTable = xgb.importance(xgb.mod, feature_names = names(training))
+xgbImpTable[1:16,]
+```  
+Compute the XGB misclassification rate for the training data:  
+```{r}
+xgb.pred.train = predict(xgb.mod, data.matrix(training[, -54]))
+xgb.pred.train.factors = as.factor(xgb.pred.train)
+levels(xgb.pred.train.factors) = c("A", "B", "C", "D", "E")
+table(xgb.pred.train.factors, training$classe)
+```
+The total XGB training misclassification rate is `r round((124/13737)*100.0, 3)` percent.  
+  
+Compute the XGB misclassification rate for the validation data:  
+```{r}
+xgb.pred.val = predict(xgb.mod, data.matrix(validation[, -54]))
+xgb.pred.val.factors = as.factor(xgb.pred.val)
+levels(xgb.pred.val.factors) = c("A", "B", "C", "D", "E")
+table(xgb.pred.val.factors, validation$classe)
+```
+The total XGB validation misclassification rate is `r round((97/5885)*100.0, 3)` percent.  
+  
+The XGB predicted classifications for the test set observations are computed as follows.    
+```{r}
+xgb.pred.test = predict(xgb.mod, data.matrix(testing[-54]))
+xgb.pred.test.factors = as.factor(xgb.pred.test)
+levels(xgb.pred.test.factors) = c("A", "B", "C", "D", "E")
+```   
+  
+### Support Vector Machine
+SVM was chosen because it is considered one of the best out-of-the-box classifiers. (See [2], Chapter 9.) SVM requires parameter tuning to achieve best results. This was done using the code and results below. The SVM method employs 10-fold cross validation as the default. (This tuning code is not active within the Rmd file, as it requires several hours to run.)  
+```{r}
+library(e1071)
+```  
+  
+```{r eval=FALSE}
+svm.tune = tune(svm, classe ~ ., data = training, kernel = "radial", 
+                ranges = list(cost = c(1, 10, 50), gamma = c(0.01, 0.1, 1)))
+svm.tune
+```
+Parameter tuning of ‘svm’:
+    
+    - sampling method: 10-fold cross validation 
+
+- best parameters:
+    cost gamma
+50   0.1
+
+- best performance: 0.005823529 
+  
+```{r eval=FALSE}
+svm.tune = tune(svm, classe ~ ., data = training, kernel = "radial", 
+                ranges = list(cost = c(50, 100, 150), gamma = c(0.01, 0.1)))
+summary(svm.tune)
+```  
+Parameter tuning of ‘svm’:
+    
+    - sampling method: 10-fold cross validation 
+
+- best parameters:
+    cost gamma
+50   0.1
+
+- best performance: 0.0016 
+
+The results of the parameter tuning effort are used in the call below.  
+```{r}
+svm.mod = svm(classe ~ ., data = training, kernel = "radial", 
+              cost = 50, gamma = 0.1)
+summary(svm.mod)
+```
+Compute the SVM misclassification rate for the training data:  
+```{r}
+svm.pred.train = predict(svm.mod, training)
+table(svm.pred.train, training$classe)
+```
+The total SVM training misclassification rate is `r round((0/13737)*100.0, 3)` percent.  
+  
+Compute the SVM misclassification rate for the validation data:  
+```{r}
+svm.pred.val = predict(svm.mod, validation)
+table(svm.pred.val, validation$classe)
+```
+The total SVM validation misclassification rate is `r round((22/5885)*100.0, 3)` percent.  
+  
+The SVM predicted classifications for the test set observations are computed as follows.  
+```{r}
+svm.pred.test = predict(svm.mod, testing)
+```
+
+## Conclusion
+The out-of-sample error rates for each learning method, evaluated using the validation data, are  
+```{r echo=FALSE}
+OSER = data.frame(method = c("KNN", "RF ", "XGB", "SVM"), 
+                  oser = c(3.025, 0.204, 1.648, 0.374))
+OSER
+```   
+The average over the four learning methods is `r round(mean(OSER$oser), 3)` percent. This is an estimate of the expected error rate when the trained models are presented with new data. Based on the estimated average out-of-sample error rate of 1.313 percent, a 19/20 or 20/20 score was expected, with a score of 20/20 achieved.  
+  
+A Generalized Additive Model (GAM) to combine the results of the four learning methods above was considered. However, since all four models gave the same results on the test data (see below), it was not deemed necessary.   
+```{r}
+knn.pred.test == rf.pred.test
+rf.pred.test == xgb.pred.test.factors
+xgb.pred.test.factors == svm.pred.test
+```   
+  
+## References
+1. Practical Statistics for Data Scientists, P. Bruce and A. Bruce, O'Reilly, 2017.
+2. Introduction to Statistical Learning, G. James, D. Witten, T. Hastie, R. Tibshirani, Springer, 2013.
